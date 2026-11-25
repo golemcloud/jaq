@@ -8,6 +8,34 @@ def inside(xs): . as $x | xs | contains($x);
 def  index($i): indices($i)[ 0];
 def rindex($i): indices($i)[-1];
 
+# jq 1.8's `delpaths`: every path addresses the original value. An array index means the
+# element that `.[i]` reads, an index outside the array or a path through `null` deletes
+# nothing, and a final slice deletes each element it covers. The distinct resolved paths are
+# deleted in descending order, so no deletion moves an element that a later one addresses.
+def delpaths($paths):
+  def absolute($c): floor | if . < 0 then . + ($c | length) end | select(0 <= . and . < ($c | length));
+  if $paths | type != "array" then error("Paths must be specified as an array") end |
+  reduce $paths[] as $p (.;
+    if $p | type == "array" then . else error("Path must be specified as array, not \($p | type)") end) |
+  if any($paths[]; . == []) then null else
+  . as $v |
+  [ $paths[] as $p
+    | reduce $p[:-1][] as $k ([];
+        if . == null then . else
+          . as $q | ($v | getpath($q)) as $c |
+          if $c == null then null
+          elif ($c | type) == "array" and ($k | type) == "number" then [$k | absolute($c) | $q + [.]][0]
+          else $q + [$k] end
+        end)
+    | values as $q | ($v | getpath($q)) as $c | $p[-1] as $k
+    | if $c == null then empty
+      elif ($c | type) != "array" then $q + [$k]
+      elif ($k | type) == "number" then $k | absolute($c) | $q + [.]
+      elif ($k | type) == "object" then [range(0; $c | length)][$k.start:$k.end][] | $q + [.]
+      else $q + [$k] end
+  ] | unique | reverse | reduce .[] as $path ($v; getpath($path) |= empty) end;
+def del(f): delpaths([path(f)]);
+
 # Formatting
 def @json: tojson;
 

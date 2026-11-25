@@ -455,6 +455,26 @@ yields!(
     "{} | delpaths([[\"a\",0]]) | tojson",
     "{}"
 );
+yields!(
+    jq_delpaths_original_indices,
+    "[0,1,2,3] | [delpaths([[-2],[-1]]), del(.[-2,-1]), del(.[1,-3]), del(.[-1,-1]), del(.[2.5,2]), del(.[0:2], .[3]), del(.[1:], .[-4])] | tojson",
+    "[[0,1],[0,1],[0,2,3],[0,1,2],[0,1,3],[2],[]]"
+);
+yields!(
+    jq_delpaths_outside_indices,
+    "[0,1,2,3] | [del(.[-5]), del(.[-4,3]), delpaths([[1e20]]), delpaths([[-1e20]])] | tojson",
+    "[[0,1,2,3],[1,2],[0,1,2,3],[0,1,2,3]]"
+);
+yields!(
+    jq_delpaths_nested_indices,
+    "[[0,1,2],[3,4,5]] | del(.[1][-1], .[-1][-3]) | tojson",
+    "[[0,1,2],[4]]"
+);
+yields!(
+    jq_delpaths_null_and_repeated,
+    "[null | del(.[-1]), ([1,2,3] | delpaths([[0],[0]]))] | tojson",
+    "[null,[2,3]]"
+);
 
 // A value nested far deeper than a native stack could recurse through is compared, contained,
 // merged, written and dropped all the same (a test thread's stack is 2 MiB), and written as jq
