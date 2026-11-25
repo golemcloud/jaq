@@ -548,11 +548,14 @@ fn fmt_jq_dec(f: &mut fmt::Formatter, literal: &str) -> fmt::Result {
         Some(index) => (&rest[..index], &rest[index + 1..]),
         None => (rest, "0"),
     };
-    // an exponent that does not fit `i128` lies far outside decNumber's range either way
+    // An exponent beyond `far` lies far outside decNumber's range either way. Clamping it there
+    // leaves room to add the digit counts below without overflow.
     let far = i128::from(i64::MAX) * 4;
     let exponent = exponent
         .parse::<i128>()
-        .unwrap_or(if exponent.starts_with('-') { -far } else { far });
+        .map_or(if exponent.starts_with('-') { -far } else { far }, |e| {
+            e.clamp(-far, far)
+        });
     let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let joined = alloc::format!("{integer}{fraction}");
     let trimmed = joined.trim_start_matches('0');
