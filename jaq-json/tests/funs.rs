@@ -81,6 +81,11 @@ fn has() {
     give(json!({"a": 1, "b": null}), r#"has("a")"#, json!(true));
     give(json!({"a": 1, "b": null}), r#"has("b")"#, json!(true));
     give(json!({"a": 1, "b": null}), r#"has("c")"#, json!(false));
+    give(
+        json!(null),
+        r#"[has("a"), has(0), has(null), has([]), has({})]"#,
+        json!([false, false, false, false, false]),
+    );
 }
 
 yields!(indices_str, r#""a,b, cd, efg" | indices(", ")"#, [3, 7]);

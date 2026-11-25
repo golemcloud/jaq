@@ -265,6 +265,7 @@ fn base<D: for<'a> DataT<V<'a> = Val>>() -> Box<[Filter<RunPtr<D>>]> {
         }),
         ("has", v(1), |cv| {
             unary(cv, |v, k| match (&v, &k) {
+                (Val::Null, _) => Ok(false.into()),
                 (Val::Obj(o), Val::TStr(_) | Val::BStr(_)) => Ok(o.contains_key(&k).into()),
                 (Val::Arr(a), Val::Num(n)) => {
                     // jq truncates the index; NaN and negative indices are never present.
