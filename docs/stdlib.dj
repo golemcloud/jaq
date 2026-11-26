@@ -750,14 +750,19 @@ For example:
 ### `delpaths($paths)`
 
 The filter `delpaths($paths)` takes an array of paths and
-deletes all corresponding values.
-Every path refers to the original input value, as in `jq`.
+deletes all corresponding values, as `jq` does:
+it sorts the paths and groups them by their first key.
+For each group in turn, it deletes the rest of the group's paths
+from the value at that key, as the groups before it have changed the value.
+Then it deletes the keys that end a path, all at once.
+A negative array index counts from the end of the array.
 For example:
 
 - `[1, 2, 3] | delpaths([[0]])      --> [2, 3]`
 - `[{a: 1, b: 2}, 3] | delpaths([[0, "b"], [1]]) --> [{"a": 1}]`
 - `[1, 2, 3] | delpaths([[0], [0]]) --> [2, 3]`
 - `[0, 1, 2, 3] | delpaths([[-2], [-1]]) --> [0, 1]`
+- `[[0, 1], [2, 3]] | delpaths([[1, 0], [-1, 0]]) --> [[0, 1], []]`
 
 {#pick}
 ### `pick(f)`

@@ -1,4 +1,4 @@
-use crate::{jv_parse, Error, Val, ValR};
+use crate::{jv_parse, Error, Map, Num, Rc, Val, ValR};
 use alloc::{boxed::Box, vec::Vec};
 use bstr::ByteSlice;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -287,6 +287,7 @@ fn base<D: for<'a> DataT<V<'a> = Val>>() -> Box<[Filter<RunPtr<D>>]> {
                 x.indices(&v).map(|idxs| idxs.map(to_int).collect())
             })
         }),
+        ("delpaths", v(1), |cv| unary(cv, delpaths)),
         ("bsearch", v(1), |cv| {
             unary(cv, move |a, x| {
                 a.as_arr().map(|a| Val::from(bsearch(a, &x)))
@@ -308,4 +309,210 @@ fn bsearch(a: &[Val], x: &Val) -> isize {
         }
     }
     -1 - start as isize
+}
+
+/// jq's `jv_delpaths`: the paths sorted, then deleted as [`delpaths_sorted`] does.
+fn delpaths(v: Val, paths: Val) -> ValR {
+    let Val::Arr(paths) = paths else {
+        return Err(Error::str("Paths must be specified as an array"));
+    };
+    let mut paths: Vec<&Val> = paths.iter().collect();
+    paths.sort();
+    let paths = paths
+        .into_iter()
+        .map(|p| match p {
+            Val::Arr(p) => Ok(&p[..]),
+            p => Err(Error::str(format_args!(
+                "Path must be specified as array, not {}",
+                crate::type_name(p)
+            ))),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    match paths.first() {
+        None => Ok(v),
+        Some([]) => Ok(Val::Null),
+        Some(_) => delpaths_sorted(v, &paths),
+    }
+}
+
+/// jq's `delpaths_sorted`, on a stack of levels rather than recursing once per key of a path.
+///
+/// At a level, the paths share their first keys up to the level's depth, and `v` is the value
+/// at those keys. They are grouped by their next key, an equal key in one group. A group that has
+/// a path ending at the key deletes that key; any other group deletes the rest of its paths from
+/// the value at the key, in the value as the groups before it changed it. The keys are deleted
+/// last.
+fn delpaths_sorted<'p>(v: Val, paths: &'p [&'p [Val]]) -> ValR {
+    struct Level<'p> {
+        v: Val,
+        paths: &'p [&'p [Val]],
+        // the group under way, and where the next one starts
+        i: usize,
+        j: usize,
+        delkeys: Vec<&'p Val>,
+    }
+    let level = |v, paths| Level {
+        v,
+        paths,
+        i: 0,
+        j: 0,
+        delkeys: Vec::new(),
+    };
+    let mut stack = Vec::from([level(v, paths)]);
+    loop {
+        let depth = stack.len() - 1;
+        let Some(top) = stack.last_mut() else {
+            unreachable!()
+        };
+        if top.i < top.paths.len() {
+            let paths = top.paths;
+            let path: &'p [Val] = paths[top.i];
+            let key = &path[depth];
+            let group = paths[top.i..].iter().take_while(|p| p[depth] == *key);
+            let j = top.i + group.count();
+            if path.len() == depth + 1 {
+                top.delkeys.push(key);
+                top.i = j;
+            } else {
+                let sub = get(&top.v, key)?;
+                if sub == Val::Null {
+                    top.i = j;
+                } else {
+                    top.j = j;
+                    let group = &paths[top.i..j];
+                    stack.push(level(sub, group));
+                }
+            }
+            continue;
+        }
+        let Some(done) = stack.pop() else {
+            unreachable!()
+        };
+        let v = dels(done.v, &done.delkeys)?;
+        let Some(parent) = stack.last_mut() else {
+            return Ok(v);
+        };
+        let path: &'p [Val] = parent.paths[parent.i];
+        parent.v = set(core::mem::take(&mut parent.v), &path[depth - 1], v)?;
+        parent.i = parent.j;
+    }
+}
+
+/// The bounds of jq's `parse_slice`, where a slice object must have both a start and an end.
+fn slice_of(slice: &Map, len: usize) -> Result<(usize, usize), Error> {
+    let start = slice.get(&Val::utf8_str("start"));
+    let end = slice.get(&Val::utf8_str("end"));
+    if start.is_none() || end.is_none() {
+        return Err(Error::str("Array/string slice indices must be integers"));
+    }
+    crate::slice_bounds(start..end, len)
+}
+
+/// jq's `jv_get`.
+fn get(v: &Val, key: &Val) -> ValR {
+    if let (Val::Arr(_) | Val::TStr(_) | Val::BStr(_), Val::Obj(o)) = (v, key) {
+        slice_of(o, 0)?;
+    }
+    jaq_core::ValT::index(v.clone(), key)
+}
+
+/// jq's `jv_set` of a key where [`get`] read a value other than `null`.
+fn set(mut v: Val, key: &Val, x: Val) -> ValR {
+    match (&mut v, key) {
+        (Val::Obj(o), Val::TStr(_) | Val::BStr(_)) => {
+            Rc::make_mut(o).insert(key.clone(), x);
+        }
+        (Val::Arr(a), Val::Num(n)) => {
+            let i = crate::jq_array_index(n, a.len());
+            let i = i.ok_or_else(|| Error::str("Out of bounds negative array index"))?;
+            Rc::make_mut(a)[i] = x;
+        }
+        (Val::Arr(a), Val::Obj(o)) => {
+            let (skip, take) = slice_of(o, a.len())?;
+            let Val::Arr(x) = x else {
+                return Err(Error::str(
+                    "A slice of an array can only be assigned another array",
+                ));
+            };
+            Rc::make_mut(a).splice(skip..skip + take, x.iter().cloned());
+        }
+        (Val::TStr(_) | Val::BStr(_), Val::Obj(_)) => {
+            return Err(Error::str("Cannot update string slices"))
+        }
+        _ => {
+            return Err(Error::str(format_args!(
+                "Cannot update field at {} index of {}",
+                crate::type_name(key),
+                crate::type_name(&v)
+            )))
+        }
+    }
+    Ok(v)
+}
+
+/// jq's `jv_dels`: delete sorted keys from a value.
+fn dels(v: Val, keys: &[&Val]) -> ValR {
+    match v {
+        Val::Null => Ok(v),
+        _ if keys.is_empty() => Ok(v),
+        Val::Arr(mut a) => {
+            let mut del = alloc::vec![false; a.len()];
+            for key in keys {
+                match key {
+                    Val::Num(n) => {
+                        if let Some(i) = del_index(n, a.len()) {
+                            del[i] = true;
+                        }
+                    }
+                    Val::Obj(o) => {
+                        let (skip, take) = slice_of(o, a.len())?;
+                        del[skip..skip + take].fill(true);
+                    }
+                    k => {
+                        return Err(Error::str(format_args!(
+                            "Cannot delete {} element of array",
+                            crate::type_name(k)
+                        )))
+                    }
+                }
+            }
+            if del.contains(&true) {
+                let mut del = del.into_iter();
+                Rc::make_mut(&mut a).retain(|_| !del.next().unwrap_or(false));
+            }
+            Ok(Val::Arr(a))
+        }
+        Val::Obj(mut o) => {
+            let is_str = |k: &Val| matches!(k, Val::TStr(_) | Val::BStr(_));
+            if let Some(k) = keys.iter().find(|k| !is_str(k)) {
+                return Err(Error::str(format_args!(
+                    "Cannot delete {} field of object",
+                    crate::type_name(k)
+                )));
+            }
+            if keys.iter().any(|k| o.contains_key(*k)) {
+                let gone = |k: &Val| keys.binary_search(&k).is_ok();
+                Rc::make_mut(&mut o).retain(|k, _| !gone(k));
+            }
+            Ok(Val::Obj(o))
+        }
+        v => Err(Error::str(format_args!(
+            "Cannot delete fields from {}",
+            crate::type_name(&v)
+        ))),
+    }
+}
+
+/// The element that jq's `jv_dels` deletes for a number: the number truncated to an `int` (one
+/// outside its range deletes nothing), from the end of the array when the number is negative.
+fn del_index(n: &Num, len: usize) -> Option<usize> {
+    let d = n.as_f64();
+    let t = d.trunc();
+    if !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&t) {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let t = t as i64;
+    let i = if d < 0.0 { len as i64 + t } else { t };
+    usize::try_from(i).ok().filter(|i| *i < len)
 }

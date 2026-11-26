@@ -471,7 +471,7 @@ yields!(
     "{}"
 );
 yields!(
-    jq_delpaths_original_indices,
+    jq_delpaths_indices,
     "[0,1,2,3] | [delpaths([[-2],[-1]]), del(.[-2,-1]), del(.[1,-3]), del(.[-1,-1]), del(.[2.5,2]), del(.[0:2], .[3]), del(.[1:], .[-4])] | tojson",
     "[[0,1],[0,1],[0,2,3],[0,1,2],[0,1,3],[2],[]]"
 );
@@ -507,6 +507,36 @@ yields!(
     r#"[null,null,null,null,null,{"a":null},{"a":null},{"a":null},[null,1],[5]]"#
 );
 
+// jq's `delpaths`: the paths sorted and grouped by their first key, each group's rest deleted in
+// turn from the value as changed so far, and the keys that end a path deleted last.
+yields!(
+    jq_delpaths_grouped,
+    r#"[([0,1,2,3] | del(.[-1.5]), del(.[-4.5]), del(.[-0.5]), delpaths([[1,0],[1]])),
+      ([[0,1],[2,3]] | del(.[-0.5][0]), del(.[1][0], .[-1][0]), del(.[1][0], .[1.5][0])),
+      ([1,2,3,4] | del(.[1:][0], .[-1])), ([[1,2,3]] | del(.[0][:-1], .[-1][-1])),
+      ([[1,2],[3,4]] | del(.[1:][0][0], .[1][1])), ({"a":1} | delpaths([["a","b"],["a"]])),
+      (null | del(.a)), ([1,2,3] | del(.[0,0]), delpaths([[1],[1],[0]]), del(.[:-1],.[0])),
+      ({"a":1,"b":2,"c":3} | del(.a))]
+     | tojson"#,
+    r#"[[0,1,2],[1,2,3],[0,1,2,3],[0,2,3],[[1],[2,3]],[[0,1],[]],[[0,1],[]],[1,3],[[2]],[[1,2],[]],{},null,[2,3],[3],[3],{"b":2,"c":3}]"#
+);
+yields!(
+    jq_delpaths_errors,
+    r#"[try ([1,[2,[3,4]],5] | del(.[1][1][0], .[1][-1][-1], .[-2][1])) catch .,
+      try ([0,1,2,3] | delpaths([[{"start":1}]])) catch ., try ("abc" | del(.[0:1])) catch .,
+      try ([0] | delpaths([["a"],[0]])) catch ., try ({} | delpaths([[0]])) catch .,
+      try ([[1]] | delpaths([[[1],0]])) catch ., try ([0] | delpaths([[0], 1])) catch .]"#,
+    [
+        "Cannot delete fields from number",
+        "Array/string slice indices must be integers",
+        "Cannot delete fields from string",
+        "Cannot delete string element of array",
+        "Cannot delete number field of object",
+        "Cannot update field at array index of array",
+        "Path must be specified as array, not number"
+    ]
+);
+
 // A value nested far deeper than a native stack could recurse through is compared, contained,
 // merged, written and dropped all the same (a test thread's stack is 2 MiB), and written as jq
 // writes it: what lies deeper than 10,000 levels shows as `<skipped: too deep>`.
@@ -533,6 +563,11 @@ fn deep_values() {
         json!(null),
         &format!("{arr} | [..] | length"),
         json!(100001),
+    );
+    give(
+        json!(null),
+        &format!("{arr} | delpaths([[range(100000) | 0]]) | getpath([range(99999) | 0])"),
+        json!([]),
     );
 }
 
