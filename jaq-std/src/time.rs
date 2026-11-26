@@ -1,7 +1,7 @@
 use crate::{Error, ValR, ValT, ValTx};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use jiff::{civil::DateTime, fmt::strtime, tz, Timestamp};
+use jiff::{fmt::strtime, tz, Timestamp};
 
 /// Convert a date-time pair to a UNIX epoch timestamp.
 fn timestamp_to_epoch<V: ValT>(ts: Timestamp, frac: bool) -> ValR<V> {
@@ -20,24 +20,6 @@ fn int<V: ValT>(i: i64) -> ValR<V> {
     isize::try_from(i)
         .map(V::from)
         .or_else(|_| V::from_num(&i.to_string()))
-}
-
-/// Convert a `DateTime` to a "broken down time" array
-fn datetime_to_array<V: ValT>(dt: DateTime) -> [V; 8] {
-    [
-        V::from(dt.year() as isize),
-        V::from(dt.month() as isize - 1),
-        V::from(dt.day() as isize),
-        V::from(dt.hour() as isize),
-        V::from(dt.minute() as isize),
-        if dt.subsec_nanosecond() > 0 {
-            V::from(dt.second() as f64 + dt.subsec_nanosecond() as f64 / 1e9)
-        } else {
-            V::from(dt.second() as isize)
-        },
-        V::from(dt.weekday().to_sunday_zero_offset() as isize),
-        V::from(dt.day_of_year() as isize - 1),
-    ]
 }
 
 /// Parse an ISO 8601 timestamp string to a number holding the equivalent UNIX timestamp
@@ -552,91 +534,130 @@ impl Format<'_> {
     }
 }
 
-/// Parse a string into a "broken down time" array.
+/// Parse a string into a "broken down time" array, as jq does with glibc's `strptime`.
 ///
-/// Without a time zone, this is jq's (with the C library's `strptime`): the fields the format
-/// parses, over a `struct tm` of zeros (the year 1900, January, day 0), and the day of the week
-/// and of the year computed as jq computes them when the day of the month is 1 to 31, or else
-/// jq's markers for them, 8 and 367.
+/// This is the fields that the format parses, over a `struct tm` of zeros (the year 1900, January,
+/// day 0) or the local time of a parsed `%s`, with jq's markers 8 and 367 for a day of the week
+/// and of the year not parsed. The other fields are then completed as [`complete`] does. Text
+/// after the date is an error unless it starts with white space; then it is a ninth element.
 pub fn strptime<V: ValT>(s: &str, fmt: &str) -> ValR<V> {
-    let nomatch = |_| Error::str(format_args!("date \"{s}\" does not match format \"{fmt}\""));
-    let bdt = strtime::BrokenDownTime::parse(fmt, s).map_err(nomatch)?;
-    if (bdt.offset(), bdt.iana_time_zone()) == (None, None) {
-        return tm_fields(&bdt).into_iter().map(Ok).collect();
+    let nomatch = || Error::str(format_args!("date \"{s}\" does not match format \"{fmt}\""));
+    let (bdt, len) = strtime::BrokenDownTime::parse_prefix(fmt, s).map_err(|_| nomatch())?;
+    let rest = &s[len..];
+    // C's `isspace`
+    let space = |c: char| matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r');
+    // glibc reads a year and seconds since the epoch without a sign
+    let negative =
+        bdt.year().is_some_and(|y| y < 0) || bdt.timestamp().is_some_and(|t| t.as_second() < 0);
+    if rest.chars().next().is_some_and(|c| !space(c)) || negative {
+        return Err(nomatch());
     }
-    let dt = bdt.to_zoned().map_err(Error::str)?.into();
-    datetime_to_array(dt).into_iter().map(Ok).collect()
-}
-
-/// The "broken down time" jq makes of the fields `strptime` parsed (see [`strptime`]).
-fn tm_fields<V: ValT>(bdt: &strtime::BrokenDownTime) -> [V; 8] {
-    let year = bdt.year().map_or(1900, isize::from);
-    let mon = bdt.month().map_or(0, |month| isize::from(month) - 1);
-    let mday = bdt.day().map_or(0, isize::from);
-    let in_month = (1..=31).contains(&mday);
-    let wday = match bdt.weekday() {
-        Some(weekday) => weekday.to_sunday_zero_offset() as isize,
-        None if in_month => jq_wday(year, mon, mday),
-        None => 8,
-    };
-    let yday = match bdt.day_of_year() {
-        Some(day) => isize::from(day) - 1,
-        None if in_month => jq_yday(year, mon, mday),
-        None => 367,
-    };
+    let base = bdt.timestamp().and_then(|ts| {
+        let tm = tm_at(ts.as_second(), Some(&tz::TimeZone::system()))?;
+        Some([
+            tm.year, tm.mon, tm.mday, tm.hour, tm.min, tm.sec, tm.wday, tm.yday,
+        ])
+    });
+    let mut tm = base.unwrap_or([1900, 0, 0, 0, 0, 0, 8, 367]);
+    let parsed = [
+        bdt.year().map(i64::from),
+        bdt.month().map(|m| i64::from(m) - 1),
+        bdt.day().map(i64::from),
+        bdt.hour().map(i64::from),
+        bdt.minute().map(i64::from),
+        bdt.second().map(i64::from),
+        bdt.weekday().map(|w| i64::from(w.to_sunday_zero_offset())),
+        bdt.day_of_year().map(|d| i64::from(d) - 1),
+    ];
+    for (field, parsed) in tm.iter_mut().zip(parsed) {
+        *field = parsed.unwrap_or(*field);
+    }
+    let week = (bdt.sunday_based_week().map(|w| (w, 0)))
+        .or_else(|| bdt.monday_based_week().map(|w| (w, 1)))
+        .map(|(w, offset)| (i64::from(w), offset));
+    complete(&mut tm, parsed.map(|p| p.is_some()), week);
+    #[allow(clippy::cast_precision_loss)]
     let second = match bdt.subsec_nanosecond() {
-        Some(nanos) if nanos > 0 => {
-            V::from(f64::from(bdt.second().unwrap_or(0)) + f64::from(nanos) / 1e9)
-        }
-        _ => V::from(bdt.second().map_or(0, isize::from)),
+        Some(nanos) if nanos > 0 => Ok(V::from(tm[5] as f64 + f64::from(nanos) / 1e9)),
+        _ => int(tm[5]),
     };
-    [
-        V::from(year),
-        V::from(mon),
-        V::from(mday),
-        V::from(bdt.hour().map_or(0, isize::from)),
-        V::from(bdt.minute().map_or(0, isize::from)),
-        second,
-        V::from(wday),
-        V::from(yday),
-    ]
+    let fields = tm[..5].iter().copied().map(int);
+    let fields = fields
+        .chain([second])
+        .chain(tm[6..].iter().copied().map(int));
+    let rest = (!rest.is_empty()).then(|| Ok(V::from(rest.to_string())));
+    fields.chain(rest).collect()
 }
 
-/// jq's `set_tm_wday`: the day of the week, by a formula that counts March as month 1.
-fn jq_wday(year: isize, mon: isize, mday: isize) -> isize {
-    let century = year / 100;
-    let mut short_year = year % 100;
-    if mon < 2 {
-        short_year -= 1;
-    }
-    let mut month = mon - 1;
-    if month < 1 {
-        month += 12;
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    let shift = (2.6 * month as f64 - 0.2).floor() as isize;
-    #[allow(clippy::cast_possible_truncation)]
-    let quarter = (short_year as f64 / 4.0).floor() as isize;
-    #[allow(clippy::cast_possible_truncation)]
-    let centuries = (century as f64 / 4.0).floor() as isize;
-    let wday = (mday + shift + short_year + quarter + centuries - 2 * century) % 7;
-    if wday < 0 {
-        wday + 7
-    } else {
-        wday
-    }
+/// The days of a year before each month, without and with a leap day.
+const MONTH_DAYS: [[i64; 13]; 2] = [
+    [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365],
+    [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366],
+];
+
+/// The month (0 to 11, or -1 before the year) and day of a day of the year, as glibc counts them
+/// past the end of December.
+fn month_day(year: i64, yday: i64) -> (i64, i64) {
+    let days = &MONTH_DAYS[usize::from(is_leap(year))];
+    let mon = days[..12].iter().take_while(|d| **d <= yday).count();
+    let before = mon.checked_sub(1).map_or(365, |m| days[m]);
+    (mon as i64 - 1, yday - before + 1)
 }
 
-/// jq's `set_tm_yday`: the day of the year, from the first of January (0).
-fn jq_yday(year: isize, mon: isize, mday: isize) -> isize {
-    const DAYS: [isize; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let leap_day = isize::from(mon > 1 && leap);
-    let mut month = mon.abs();
-    if month > 11 {
-        month %= 12;
+/// The day of the week as glibc's `strptime` computes it: from the days since 1970, counting the
+/// leap days with C's division, which truncates.
+fn glibc_wday(year: i64, mon: i64, mday: i64) -> i64 {
+    let mon = mon.clamp(0, 11);
+    let quads = (year - i64::from(mon < 2)) / 4;
+    let centuries = quads / 25;
+    let days = -473 + 365 * (year - 1970) + quads - centuries
+        + i64::from(quads % 25 < 0)
+        + centuries / 4
+        + MONTH_DAYS[0][mon as usize]
+        + mday
+        - 1;
+    days.rem_euclid(7)
+}
+
+/// Complete the fields `tm` (year, month, day, hour, minute, second, day of the week and of the
+/// year) as glibc's `strptime` does, given which of them were parsed and the week of the year
+/// (`%U` counting from Sunday, offset 0, or `%W` from Monday, offset 1).
+///
+/// When a year, month or day was parsed, a missing month and day come from a parsed day of the
+/// year, a missing day of the week from the date, and a missing day of the year from the month
+/// and day. With a week and a day of the week, a missing day of the year comes from those, and
+/// a missing month and day from the day of the year.
+fn complete(tm: &mut [i64; 8], parsed: [bool; 8], week: Option<(i64, i64)>) {
+    let [have_year, have_mon, have_mday, .., have_wday, have_yday] = parsed;
+    let want_xday = have_year || have_mon || have_mday;
+    let fill = |tm: &mut [i64; 8]| {
+        let (mon, mday) = month_day(tm[0], tm[7]);
+        if !have_mon {
+            tm[1] = mon;
+        }
+        if !have_mday {
+            tm[2] = mday;
+        }
+    };
+    if want_xday && !have_wday {
+        if !(have_mon && have_mday) && have_yday {
+            fill(tm);
+        }
+        tm[6] = glibc_wday(tm[0], tm[1], tm[2]);
     }
-    DAYS[month as usize] + leap_day + mday - 1
+    if want_xday && !have_yday {
+        let days = &MONTH_DAYS[usize::from(is_leap(tm[0]))];
+        tm[7] = days[tm[1].clamp(0, 11) as usize] + tm[2] - 1;
+    }
+    if let (Some((week, offset)), true) = (week, have_wday) {
+        let jan1 = glibc_wday(tm[0], 0, 1);
+        if !have_yday {
+            tm[7] = (7 - (jan1 - offset)) % 7 + (week - 1) * 7 + (tm[6] - offset + 7) % 7;
+        }
+        if !have_mday || !have_mon {
+            fill(tm);
+        }
+    }
 }
 
 /// Parse an array into a UNIX epoch timestamp, as jq's `mktime` (`jv2tm`, then `timegm`).
