@@ -491,6 +491,13 @@ yields!(
     "[null,[2,3]]"
 );
 
+// As jq's `parse_slice`, a slice object must have both a start and an end.
+yields!(
+    slice_object_bounds,
+    r#"[try ([1] | .[{}]) catch ., try ([1] | .[{"start": 0}] |= [5]) catch ., try ("ab" | .[{"end": 1}]) catch ., [[1] | .[{}]?], (null | .[{}]), try (null | .[{}] |= [1]) catch ., ([1] | .[{"start": 0, "end": 1}] |= [7])] | tojson"#,
+    r#"["Array/string slice indices must be integers","Array/string slice indices must be integers","Array/string slice indices must be integers",[],null,"Array/string slice indices must be integers",[7]]"#
+);
+
 // As in jq, a slice in a path has both bounds, `null` for an omitted one.
 yields!(
     slice_path_bounds,

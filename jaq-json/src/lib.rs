@@ -429,8 +429,10 @@ impl jaq_core::ValT for Val {
         f: impl Fn(Self) -> I,
     ) -> ValX<'a> {
         if let (Val::BStr(_) | Val::TStr(_) | Val::Arr(_), Val::Obj(o)) = (&self, index) {
-            let range = o.get(&Val::utf8_str("start"))..o.get(&Val::utf8_str("end"));
-            return self.map_range(range, opt, f);
+            return match slice_range(o) {
+                Ok(range) => self.map_range(range, opt, f),
+                Err(e) => opt.fail(self, |_| Exn::from(e)),
+            };
         };
         match self {
             // jq reads `null` at a key, an index or a slice, and updates `null` as an empty
@@ -698,6 +700,17 @@ fn slice_bounds(range: val::Range<&Val>, len: usize) -> Result<(usize, usize), E
     Ok((start, end - start))
 }
 
+/// The bounds of a slice object, as jq's `parse_slice` reads them: it must have both a `start`
+/// and an `end`.
+pub(crate) fn slice_range(o: &Map) -> Result<val::Range<&Val>, Error> {
+    let start = o.get(&Val::utf8_str("start"));
+    let end = o.get(&Val::utf8_str("end"));
+    if start.is_none() || end.is_none() {
+        return Err(Error::str("Array/string slice indices must be integers"));
+    }
+    Ok(start..end)
+}
+
 /// The object jq indexes by for a slice: `{"start": ..., "end": ...}`.
 fn slice_object(range: val::Range<&Val>) -> Val {
     let bound = |b: Option<&Val>| b.cloned().unwrap_or(Val::Null);
@@ -839,9 +852,7 @@ impl Val {
             (s @ Val::Obj(_), i) => return Err(index_type_error(&s, i)),
             (v @ (Val::BStr(_) | Val::TStr(_) | Val::Arr(_)), Val::Obj(o)) => {
                 use jaq_core::ValT;
-                let start = o.get(&Val::utf8_str("start"));
-                let end = o.get(&Val::utf8_str("end"));
-                return v.range(start..end).map(Some);
+                return v.range(slice_range(o)?).map(Some);
             }
             (s, _) => return Err(index_type_error(&s, index)),
         })

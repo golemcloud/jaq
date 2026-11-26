@@ -1,4 +1,4 @@
-use crate::{jv_parse, Error, Map, Num, Rc, Val, ValR};
+use crate::{jv_parse, Error, Num, Rc, Val, ValR};
 use alloc::{boxed::Box, vec::Vec};
 use bstr::ByteSlice;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -374,7 +374,7 @@ fn delpaths_sorted<'p>(v: Val, paths: &'p [&'p [Val]]) -> ValR {
                 top.delkeys.push(key);
                 top.i = j;
             } else {
-                let sub = get(&top.v, key)?;
+                let sub = jaq_core::ValT::index(top.v.clone(), key)?;
                 if sub == Val::Null {
                     top.i = j;
                 } else {
@@ -398,25 +398,7 @@ fn delpaths_sorted<'p>(v: Val, paths: &'p [&'p [Val]]) -> ValR {
     }
 }
 
-/// The bounds of jq's `parse_slice`, where a slice object must have both a start and an end.
-fn slice_of(slice: &Map, len: usize) -> Result<(usize, usize), Error> {
-    let start = slice.get(&Val::utf8_str("start"));
-    let end = slice.get(&Val::utf8_str("end"));
-    if start.is_none() || end.is_none() {
-        return Err(Error::str("Array/string slice indices must be integers"));
-    }
-    crate::slice_bounds(start..end, len)
-}
-
-/// jq's `jv_get`.
-fn get(v: &Val, key: &Val) -> ValR {
-    if let (Val::Arr(_) | Val::TStr(_) | Val::BStr(_), Val::Obj(o)) = (v, key) {
-        slice_of(o, 0)?;
-    }
-    jaq_core::ValT::index(v.clone(), key)
-}
-
-/// jq's `jv_set` of a key where [`get`] read a value other than `null`.
+/// jq's `jv_set` of a key where indexing read a value other than `null`.
 fn set(mut v: Val, key: &Val, x: Val) -> ValR {
     match (&mut v, key) {
         (Val::Obj(o), Val::TStr(_) | Val::BStr(_)) => {
@@ -428,7 +410,7 @@ fn set(mut v: Val, key: &Val, x: Val) -> ValR {
             Rc::make_mut(a)[i] = x;
         }
         (Val::Arr(a), Val::Obj(o)) => {
-            let (skip, take) = slice_of(o, a.len())?;
+            let (skip, take) = crate::slice_bounds(crate::slice_range(o)?, a.len())?;
             let Val::Arr(x) = x else {
                 return Err(Error::str(
                     "A slice of an array can only be assigned another array",
@@ -465,7 +447,7 @@ fn dels(v: Val, keys: &[&Val]) -> ValR {
                         }
                     }
                     Val::Obj(o) => {
-                        let (skip, take) = slice_of(o, a.len())?;
+                        let (skip, take) = crate::slice_bounds(crate::slice_range(o)?, a.len())?;
                         del[skip..skip + take].fill(true);
                     }
                     k => {
