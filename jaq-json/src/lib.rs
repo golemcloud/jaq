@@ -880,9 +880,9 @@ impl From<String> for Val {
 
 impl From<val::Range<Val>> for Val {
     fn from(r: val::Range<Val>) -> Self {
-        let kv = |(k, v): (&str, Option<_>)| v.map(|v| (k.to_owned().into(), v));
+        let kv = |(k, v): (&str, Option<_>)| (k.to_owned().into(), v.unwrap_or(Val::Null));
         let kvs = [("start", r.start), ("end", r.end)];
-        Val::obj(kvs.into_iter().flat_map(kv).collect())
+        Val::obj(kvs.into_iter().map(kv).collect())
     }
 }
 

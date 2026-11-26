@@ -491,6 +491,13 @@ yields!(
     "[null,[2,3]]"
 );
 
+// As in jq, a slice in a path has both bounds, `null` for an omitted one.
+yields!(
+    slice_path_bounds,
+    "[path(.[1:]), path(.[:2]), path(.[1:2])] | tojson",
+    r#"[[{"start":1,"end":null}],[{"start":null,"end":2}],[{"start":1,"end":2}]]"#
+);
+
 // As in jq, deleting from `null` leaves `null`, and only a value makes an object or array of it.
 yields!(
     null_update_empty,
