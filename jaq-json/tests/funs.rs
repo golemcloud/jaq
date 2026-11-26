@@ -491,6 +491,15 @@ yields!(
     "[null,[2,3]]"
 );
 
+// As in jq, deleting from `null` leaves `null`, and only a value makes an object or array of it.
+yields!(
+    null_update_empty,
+    r#"[(null | .a |= empty, .[0] |= empty, .[-1] |= empty, .[1:] |= empty, .a? |= empty),
+      ({"a": null} | .a.b |= empty, .a[0] |= empty), (null | .a |= ., .[1] |= 1, .[1:2] |= [5])]
+     | tojson"#,
+    r#"[null,null,null,null,null,{"a":null},{"a":null},{"a":null},[null,1],[5]]"#
+);
+
 // A value nested far deeper than a native stack could recurse through is compared, contained,
 // merged, written and dropped all the same (a test thread's stack is 2 MiB), and written as jq
 // writes it: what lies deeper than 10,000 levels shows as `<skipped: too deep>`.

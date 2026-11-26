@@ -433,12 +433,19 @@ impl jaq_core::ValT for Val {
             return self.map_range(range, opt, f);
         };
         match self {
-            // jq treats null as an empty object or array when updating it by key or index.
-            Val::Null => match index {
-                Val::TStr(_) | Val::BStr(_) => Val::obj(Map::default()).map_index(index, opt, f),
-                Val::Num(_) => Val::Arr(Rc::default()).map_index(index, opt, f),
-                _ => opt.fail(self, |v| Exn::from(index_type_error(&v, index))),
-            },
+            // jq reads `null` at a key, an index or a slice, and updates `null` as an empty
+            // object or array only when the update gives a value; deleting leaves `null`.
+            Val::Null => {
+                let empty = match index {
+                    Val::TStr(_) | Val::BStr(_) => Val::obj(Map::default()),
+                    Val::Num(_) | Val::Obj(_) => Val::Arr(Rc::default()),
+                    _ => return opt.fail(self, |v| Exn::from(index_type_error(&v, index))),
+                };
+                match f(Val::Null).next().transpose()? {
+                    None => Ok(Val::Null),
+                    Some(y) => set_in_empty(empty, index, opt, y),
+                }
+            }
             // jq reads the field first, and only a string names an object's field.
             Val::Obj(_) if !matches!(index, Val::TStr(_) | Val::BStr(_)) => {
                 opt.fail(self, |v| Exn::from(index_type_error(&v, index)))
@@ -544,6 +551,11 @@ impl jaq_core::ValT for Val {
         let stb = skip_take_bytes;
         let stc = skip_take_chars;
         match self {
+            // as `map_index` updates `null`
+            Val::Null => match f(Val::Null).next().transpose()? {
+                None => Ok(Val::Null),
+                Some(y) => set_range_in_empty(range, opt, y),
+            },
             Val::Arr(ref mut a) => {
                 let (skip, take) = match slice_bounds(range, a.len()) {
                     Ok(bounds) => bounds,
@@ -719,6 +731,19 @@ fn bytes_splice(b: &mut BytesMut, skip: usize, take: usize, replace: &[u8]) {
     if replace.len() < take {
         b.truncate(final_len);
     }
+}
+
+/// Set the value at `index` of an empty object or array (not generic over an update, so that
+/// [`ValT::map_index`] can call it for `null` without instantiating itself without end).
+fn set_in_empty<'a>(empty: Val, index: &Val, opt: path::Opt, y: Val) -> ValX<'a> {
+    use jaq_core::ValT;
+    empty.map_index(index, opt, |_| core::iter::once(Ok(y.clone())))
+}
+
+/// Set a slice of an empty array, as [`set_in_empty`] sets an index.
+fn set_range_in_empty<'a>(range: val::Range<&Val>, opt: path::Opt, y: Val) -> ValX<'a> {
+    use jaq_core::ValT;
+    Val::Arr(Rc::default()).map_range(range, opt, |_| core::iter::once(Ok(y.clone())))
 }
 
 /// If a range bound is given, absolutise and clip it between 0 and `len`,
