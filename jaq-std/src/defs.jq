@@ -76,10 +76,7 @@ def unique_by(f): [group_by(f)[] | .[0]];
 def unique: sort | unique_by(.);
 
 # Paths
-def pick(f):
-  reduce path_value(f) as [$path, $value] ({}; . *
-    reduce ($path | reverse[]) as $p ($value; {($p): .})
-  );
+def pick(f): . as $in | reduce path(f) as $p (null; setpath($p; $in | getpath($p)));
 
 def keys: keys_unsorted | sort;
 

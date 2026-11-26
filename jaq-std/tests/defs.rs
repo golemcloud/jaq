@@ -11,6 +11,15 @@ fn add() {
     give(json!([[0, 1], [2, 3]]), "add", json!([0, 1, 2, 3]));
 }
 
+// jq's `pick`: the picked paths set in `null`, so an array index makes an array.
+yields!(
+    pick_paths,
+    r#"[([1,2,3] | pick(.[1]), pick(.[1:]), pick(first)), ({"a":[1,2]} | pick(.a[1])),
+      ({"a":1,"b":{"c":2,"d":3}} | pick(.a, .b.c)), ({"a":1} | pick(empty)),
+      ([[1,2],[3]] | pick(.[1][0], .[0][1]))]"#,
+    json!([[null, 2], [2, 3], [1], {"a": [null, 2]}, {"a": 1, "b": {"c": 2}}, null, [[null, 2], [3]]])
+);
+
 // aliases for fromdateiso8601 and todateiso8601
 yields!(fromdate, r#""1970-01-02T00:00:00Z" | fromdate"#, 86400);
 yields!(todate, r#"86400 | todate"#, "1970-01-02T00:00:00Z");
