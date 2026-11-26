@@ -532,6 +532,12 @@ fn fmt_jq_float(f: &mut fmt::Formatter, x: f64) -> fmt::Result {
     }
 }
 
+/// The exponent range of jq 1.8's decNumber context. A nonzero literal whose adjusted exponent
+/// exceeds `DEC_EMAX` overflows to the largest double, and a zero's exponent stops there. A
+/// literal with digits below `DEC_ETINY` is rounded half up to that exponent.
+const DEC_EMAX: i128 = 999_999_999;
+const DEC_ETINY: i128 = -1_147_483_646;
+
 /// decNumber's to-scientific-string, which jq 1.8 uses for number literals it preserves.
 fn fmt_jq_dec(f: &mut fmt::Formatter, literal: &str) -> fmt::Result {
     let (negative, rest) = match literal.strip_prefix('-') {
@@ -539,18 +545,51 @@ fn fmt_jq_dec(f: &mut fmt::Formatter, literal: &str) -> fmt::Result {
         None => (false, literal.strip_prefix('+').unwrap_or(literal)),
     };
     let (mantissa, exponent) = match rest.find(['e', 'E']) {
-        Some(index) => (&rest[..index], rest[index + 1..].parse::<i64>()),
-        None => (rest, Ok(0)),
+        Some(index) => (&rest[..index], &rest[index + 1..]),
+        None => (rest, "0"),
     };
-    let Ok(exponent) = exponent else {
-        return write!(f, "{literal}");
-    };
+    // An exponent beyond `far` lies far outside decNumber's range either way. Clamping it there
+    // leaves room to add the digit counts below without overflow.
+    let far = i128::from(i64::MAX) * 4;
+    let exponent = exponent
+        .parse::<i128>()
+        .map_or(if exponent.starts_with('-') { -far } else { far }, |e| {
+            e.clamp(-far, far)
+        });
     let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let joined = alloc::format!("{integer}{fraction}");
     let trimmed = joined.trim_start_matches('0');
-    let digits = if trimmed.is_empty() { "0" } else { trimmed };
-    let count = digits.len() as i64;
-    let exponent = exponent - fraction.len() as i64;
+    let mut digits: Vec<u8> = if trimmed.is_empty() { "0" } else { trimmed }.into();
+    let mut exponent = exponent - fraction.len() as i128;
+    if exponent < DEC_ETINY {
+        let kept = digits.len() as i128 - (DEC_ETINY - exponent);
+        let round_up = kept >= 0 && digits[kept as usize] >= b'5';
+        digits.truncate(kept.max(0) as usize);
+        if round_up {
+            match digits.iter().rposition(|d| *d != b'9') {
+                Some(i) => {
+                    digits[i] += 1;
+                    digits[i + 1..].fill(b'0');
+                }
+                None => {
+                    digits.fill(b'0');
+                    digits.insert(0, b'1');
+                }
+            }
+        }
+        if digits.is_empty() {
+            digits.push(b'0');
+        }
+        exponent = DEC_ETINY;
+    }
+    let digits = core::str::from_utf8(&digits).unwrap_or("0");
+    let count = digits.len() as i128;
+    if exponent + count - 1 > DEC_EMAX {
+        if digits != "0" {
+            return fmt_jq_float(f, if negative { -f64::MAX } else { f64::MAX });
+        }
+        exponent = DEC_EMAX;
+    }
     let adjusted = exponent + count - 1;
     if negative {
         write!(f, "-")?;
@@ -571,6 +610,6 @@ fn fmt_jq_dec(f: &mut fmt::Formatter, literal: &str) -> fmt::Result {
             write!(f, ".{}", &digits[1..])?;
         }
         let sign = if adjusted < 0 { '-' } else { '+' };
-        write!(f, "E{sign}{}", adjusted.abs())
+        write!(f, "E{sign}{}", adjusted.unsigned_abs())
     }
 }

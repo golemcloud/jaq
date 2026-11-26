@@ -885,26 +885,24 @@ where
             bome(time::to_iso8601(&cv.1).map(D::V::from))
         }),
         ("strftime", v(1), |cv| {
-            unary(cv, |v, fmt| {
-                time::strftime(&v, &fmt, TimeZone::UTC, "strftime")
-            })
+            unary(cv, |v, fmt| time::strftime(&v, &fmt, None, "strftime"))
         }),
         ("strflocaltime", v(1), |cv| {
             unary(cv, |v, fmt| {
-                time::strftime(&v, &fmt, TimeZone::system(), "strflocaltime")
+                time::strftime(&v, &fmt, Some(TimeZone::system()), "strflocaltime")
             })
         }),
         ("gmtime", v(0), |cv| {
             if cv.1.kind_name() != "number" {
                 return bome(Err(Error::str("gmtime() requires numeric inputs")));
             }
-            bome(time::gmtime(&cv.1, TimeZone::UTC))
+            bome(time::gmtime(&cv.1, None))
         }),
         ("localtime", v(0), |cv| {
             if cv.1.kind_name() != "number" {
                 return bome(Err(Error::str("localtime() requires numeric inputs")));
             }
-            bome(time::gmtime(&cv.1, TimeZone::system()))
+            bome(time::gmtime(&cv.1, Some(TimeZone::system())))
         }),
         ("strptime", v(1), |cv| {
             unary(cv, |v, fmt| {

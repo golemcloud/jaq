@@ -11,10 +11,45 @@ fn add() {
     give(json!([[0, 1], [2, 3]]), "add", json!([0, 1, 2, 3]));
 }
 
+// jq's `pick`: the picked paths set in `null`, so an array index makes an array.
+yields!(
+    pick_paths,
+    r#"[([1,2,3] | pick(.[1]), pick(.[1:]), pick(first)), ({"a":[1,2]} | pick(.a[1])),
+      ({"a":1,"b":{"c":2,"d":3}} | pick(.a, .b.c)), ({"a":1} | pick(empty)),
+      ([[1,2],[3]] | pick(.[1][0], .[0][1]))]"#,
+    json!([[null, 2], [2, 3], [1], {"a": [null, 2]}, {"a": 1, "b": {"c": 2}}, null, [[null, 2], [3]]])
+);
+
 // aliases for fromdateiso8601 and todateiso8601
 yields!(fromdate, r#""1970-01-02T00:00:00Z" | fromdate"#, 86400);
 yields!(todate, r#"86400 | todate"#, "1970-01-02T00:00:00Z");
 yields!(tofromdate, "946684800 | todate | fromdate", 946684800);
+// As jq's `gmtime`, years far past 9999 and seconds that a 64-bit integer cannot scale to
+// microseconds, and the C library's `strftime`.
+yields!(
+    todate_far,
+    r#"[[(1e13, -1e13, 1e13 + 0) | todate, gmtime],
+      [1e13 | strftime("%c|%C|%y|%G|%j|%U|%V|%s|%Z|%z|%10Y|%-Y")],
+      [-62135596800 | strftime("%F %x %Y %C")], [-1.5 | gmtime | .[5]]]"#,
+    json!([
+        [
+            "318857-05-20T17:46:40Z",
+            [318857, 4, 20, 17, 46, 40, 0, 139],
+            "-314918-08-13T06:13:20Z",
+            [-314918, 7, 13, 6, 13, 20, 0, 224],
+            "318857-05-20T17:46:40Z",
+            [318857, 4, 20, 17, 46, 40, 0, 139]
+        ],
+        ["Sun May 20 17:46:40 318857|3188|57|318857|140|20|20|10000000000000|GMT|+0000|0000318857|318857"],
+        ["1-01-01 01/01/01 1 0"],
+        [59.5]
+    ])
+);
+yields!(
+    todate_out_of_range,
+    r#"[(1e17, 1e19, -1e300, infinite, nan, 9223372036854775807) | try todate catch .] | unique"#,
+    ["error converting number of seconds since epoch to datetime"]
+);
 
 yields!(
     drem_nan,
@@ -41,6 +76,13 @@ yields!(
     flatten_deep,
     "[[[0], 1], 2, [3, [4]]] | flatten",
     [0, 1, 2, 3, 4]
+);
+
+// Flattening an array nested deeper than a native stack could recurse through.
+yields!(
+    flatten_nested_deep,
+    "reduce range(10000) as $i (null; [.]) | [flatten, flatten(9998)]",
+    json!([[null], [[null]]])
 );
 
 // here, we diverge from jq, which returns just 1

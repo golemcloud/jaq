@@ -76,15 +76,16 @@ def unique_by(f): [group_by(f)[] | .[0]];
 def unique: sort | unique_by(.);
 
 # Paths
-def pick(f):
-  reduce path_value(f) as [$path, $value] ({}; . *
-    reduce ($path | reverse[]) as $p ($value; {($p): .})
-  );
+def pick(f): . as $in | reduce path(f) as $p (null; setpath($p; $in | getpath($p)));
 
 def keys: keys_unsorted | sort;
 
-def _flatten($x): reduce .[] as $i ([];
-  if $i | type == "array" and $x != 0 then . + ($i | _flatten($x - 1)) else . + [$i] end);
+# jq's `_flatten`, through `recurse` rather than recursing once per level of nesting:
+# each element is paired with the depth left to flatten, and an array with depth left is replaced
+# by its elements.
+def _flatten($x): [.[] | if isarray and $x != 0 then [., $x] |
+  recurse(if (.[0] | isarray) and .[1] != 0 then .[0][] as $v | [$v, .[1] - 1] else empty end) |
+  if (.[0] | isarray) and .[1] != 0 then empty else .[0] end end];
 def flatten($x): if $x < 0 then error("flatten depth must not be negative") else _flatten($x) end;
 def flatten: _flatten(-1);
 

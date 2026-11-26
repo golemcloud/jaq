@@ -81,6 +81,11 @@ fn has() {
     give(json!({"a": 1, "b": null}), r#"has("a")"#, json!(true));
     give(json!({"a": 1, "b": null}), r#"has("b")"#, json!(true));
     give(json!({"a": 1, "b": null}), r#"has("c")"#, json!(false));
+    give(
+        json!(null),
+        r#"[has("a"), has(0), has(null), has([]), has({})]"#,
+        json!([false, false, false, false, false]),
+    );
 }
 
 yields!(indices_str, r#""a,b, cd, efg" | indices(", ")"#, [3, 7]);
@@ -125,6 +130,21 @@ yields!(
     tojson_inf,
     "(1e1000 + 0) | tojson",
     "1.7976931348623157e+308"
+);
+yields!(
+    tojson_dec_exponent_bounds,
+    r#"["0e-9223372036854775808", "1.5e-9223372036854775808", "0.1e-9223372036854775807", "1e9223372036854775807", "-1e1000000000", "1e99999999999999999999999", "1e-99999999999999999999999", "0e1000000000", "99e999999998", "1e999999999"] | map(tonumber | tojson) | join(" ")"#,
+    "0E-1147483646 0E-1147483646 0E-1147483646 1.7976931348623157e+308 -1.7976931348623157e+308 1.7976931348623157e+308 0E-1147483646 0E+999999999 9.9E+999999999 1E+999999999"
+);
+yields!(
+    tojson_dec_exponent_full_width,
+    r#"["1.5e-170141183460469231731687303715884105728", "-1.5e-170141183460469231731687303715884105728", "0.0e-170141183460469231731687303715884105728", "1e170141183460469231731687303715884105727", "99e170141183460469231731687303715884105727", "-12.5e170141183460469231731687303715884105727", "0e170141183460469231731687303715884105727"] | map(tonumber | tojson) | join(" ")"#,
+    "0E-1147483646 -0E-1147483646 0E-1147483646 1.7976931348623157e+308 1.7976931348623157e+308 -1.7976931348623157e+308 0E+999999999"
+);
+yields!(
+    tojson_dec_exponent_rounding,
+    r#"["5e-1147483647", "4e-1147483647", "-6e-1147483647", "95e-1147483647", "123.45e-1147483646", "1e-1147483646"] | map(tonumber | tojson) | join(" ")"#,
+    "1E-1147483646 0E-1147483646 -1E-1147483646 1.0E-1147483645 1.23E-1147483644 1E-1147483646"
 );
 yields!(
     tojson_ninf,
@@ -450,6 +470,87 @@ yields!(
     "{} | delpaths([[\"a\",0]]) | tojson",
     "{}"
 );
+yields!(
+    jq_delpaths_indices,
+    "[0,1,2,3] | [delpaths([[-2],[-1]]), del(.[-2,-1]), del(.[1,-3]), del(.[-1,-1]), del(.[2.5,2]), del(.[0:2], .[3]), del(.[1:], .[-4])] | tojson",
+    "[[0,1],[0,1],[0,2,3],[0,1,2],[0,1,3],[2],[]]"
+);
+yields!(
+    jq_delpaths_outside_indices,
+    "[0,1,2,3] | [del(.[-5]), del(.[-4,3]), delpaths([[1e20]]), delpaths([[-1e20]])] | tojson",
+    "[[0,1,2,3],[1,2],[0,1,2,3],[0,1,2,3]]"
+);
+yields!(
+    jq_delpaths_nested_indices,
+    "[[0,1,2],[3,4,5]] | del(.[1][-1], .[-1][-3]) | tojson",
+    "[[0,1,2],[4]]"
+);
+yields!(
+    jq_delpaths_null_and_repeated,
+    "[null | del(.[-1]), ([1,2,3] | delpaths([[0],[0]]))] | tojson",
+    "[null,[2,3]]"
+);
+
+// jq's `jv_set` and `jv_dels`: an array cannot be set or deleted at an array, and only an
+// array can be assigned to a slice of an array.
+yields!(
+    array_update_errors,
+    r#"[try ([1] | .[[1]] |= 1) catch ., try ([1] | .[[1]] |= empty) catch ., try ([1] | .[[1]]? |= 1) catch ., (try ([1] | .[0:1] |= (5, null, {})) catch .), try (null | .[1:2] |= 5) catch ., ([1] | .[0:1] |= empty), ([1] | .[{}]? |= 1)] | tojson"#,
+    r#"["Cannot update field at array index of array","Cannot delete array element of array","Cannot update field at array index of array","A slice of an array can only be assigned another array","A slice of an array can only be assigned another array",[],[1]]"#
+);
+
+// As jq's `parse_slice`, a slice object must have both a start and an end.
+yields!(
+    slice_object_bounds,
+    r#"[try ([1] | .[{}]) catch ., try ([1] | .[{"start": 0}] |= [5]) catch ., try ("ab" | .[{"end": 1}]) catch ., [[1] | .[{}]?], (null | .[{}]), try (null | .[{}] |= [1]) catch ., ([1] | .[{"start": 0, "end": 1}] |= [7])] | tojson"#,
+    r#"["Array/string slice indices must be integers","Array/string slice indices must be integers","Array/string slice indices must be integers",[],null,"Array/string slice indices must be integers",[7]]"#
+);
+
+// As in jq, a slice in a path has both bounds, `null` for an omitted one.
+yields!(
+    slice_path_bounds,
+    "[path(.[1:]), path(.[:2]), path(.[1:2])] | tojson",
+    r#"[[{"start":1,"end":null}],[{"start":null,"end":2}],[{"start":1,"end":2}]]"#
+);
+
+// As in jq, deleting from `null` leaves `null`, and only a value makes an object or array of it.
+yields!(
+    null_update_empty,
+    r#"[(null | .a |= empty, .[0] |= empty, .[-1] |= empty, .[1:] |= empty, .a? |= empty),
+      ({"a": null} | .a.b |= empty, .a[0] |= empty), (null | .a |= ., .[1] |= 1, .[1:2] |= [5])]
+     | tojson"#,
+    r#"[null,null,null,null,null,{"a":null},{"a":null},{"a":null},[null,1],[5]]"#
+);
+
+// jq's `delpaths`: the paths sorted and grouped by their first key, each group's rest deleted in
+// turn from the value as changed so far, and the keys that end a path deleted last.
+yields!(
+    jq_delpaths_grouped,
+    r#"[([0,1,2,3] | del(.[-1.5]), del(.[-4.5]), del(.[-0.5]), delpaths([[1,0],[1]])),
+      ([[0,1],[2,3]] | del(.[-0.5][0]), del(.[1][0], .[-1][0]), del(.[1][0], .[1.5][0])),
+      ([1,2,3,4] | del(.[1:][0], .[-1])), ([[1,2,3]] | del(.[0][:-1], .[-1][-1])),
+      ([[1,2],[3,4]] | del(.[1:][0][0], .[1][1])), ({"a":1} | delpaths([["a","b"],["a"]])),
+      (null | del(.a)), ([1,2,3] | del(.[0,0]), delpaths([[1],[1],[0]]), del(.[:-1],.[0])),
+      ({"a":1,"b":2,"c":3} | del(.a))]
+     | tojson"#,
+    r#"[[0,1,2],[1,2,3],[0,1,2,3],[0,2,3],[[1],[2,3]],[[0,1],[]],[[0,1],[]],[1,3],[[2]],[[1,2],[]],{},null,[2,3],[3],[3],{"b":2,"c":3}]"#
+);
+yields!(
+    jq_delpaths_errors,
+    r#"[try ([1,[2,[3,4]],5] | del(.[1][1][0], .[1][-1][-1], .[-2][1])) catch .,
+      try ([0,1,2,3] | delpaths([[{"start":1}]])) catch ., try ("abc" | del(.[0:1])) catch .,
+      try ([0] | delpaths([["a"],[0]])) catch ., try ({} | delpaths([[0]])) catch .,
+      try ([[1]] | delpaths([[[1],0]])) catch ., try ([0] | delpaths([[0], 1])) catch .]"#,
+    [
+        "Cannot delete fields from number",
+        "Array/string slice indices must be integers",
+        "Cannot delete fields from string",
+        "Cannot delete string element of array",
+        "Cannot delete number field of object",
+        "Cannot update field at array index of array",
+        "Path must be specified as array, not number"
+    ]
+);
 
 // A value nested far deeper than a native stack could recurse through is compared, contained,
 // merged, written and dropped all the same (a test thread's stack is 2 MiB), and written as jq
@@ -477,6 +578,11 @@ fn deep_values() {
         json!(null),
         &format!("{arr} | [..] | length"),
         json!(100001),
+    );
+    give(
+        json!(null),
+        &format!("{arr} | delpaths([[range(100000) | 0]]) | getpath([range(99999) | 0])"),
+        json!([]),
     );
 }
 

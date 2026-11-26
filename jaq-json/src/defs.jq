@@ -8,6 +8,8 @@ def inside(xs): . as $x | xs | contains($x);
 def  index($i): indices($i)[ 0];
 def rindex($i): indices($i)[-1];
 
+def del(f): delpaths([path(f)]);
+
 # Formatting
 def @json: tojson;
 

@@ -41,15 +41,38 @@ yields!(
 yields!(
     strftime_mu,
     r#"86400.123456 | strftime("%F %T.%6f")"#,
-    "1970-01-02 00:00:00.123456"
+    "1970-01-02 00:00:00.   %6f"
 );
 yields!(gmtime, r"86400 | gmtime", [1970, 0, 2, 0, 0, 0, 5, 1]);
 yields!(
     gmtime_mu,
     r"86400.123456 | gmtime",
-    json!([1970, 0, 2, 0, 0, 0.123456, 5, 1])
+    json!([1970, 0, 2, 0, 0, 0.12345600000116974, 5, 1])
 );
 yields!(gmtime_mktime_mu, r"86400.123456 | gmtime | mktime", 86400);
+// glibc's `strptime`: the day of the week and of the year from the date, the month and day from
+// the day of the year or the week, and text after the date that starts with white space.
+yields!(
+    strptime_complete,
+    r#"[[("1900-01-15", "2100-02-01") | strptime("%Y-%m-%d")], ("2015 64" | strptime("%Y %j") | ., mktime),
+      ("99" | strptime("%y")), ("March" | strptime("%B")), ("10 3" | strptime("%U %w")),
+      ("Mon 2015 10" | strptime("%a %Y %W")), ("0-01-01" | strptime("%Y-%m-%d")),
+      ("2015-03-05 x" | strptime("%Y-%m-%d")), ("+0100" | strptime("%z")),
+      [("-5-01-01", "2015-03-05x") | try strptime("%Y-%m-%d") catch "err"]]"#,
+    json!([
+        [[1900, 0, 15, 0, 0, 0, 1, 14], [2100, 1, 1, 0, 0, 0, 1, 31]],
+        [2015, 2, 5, 0, 0, 0, 4, 63],
+        1425513600,
+        [1999, 0, 0, 0, 0, 0, 4, -1],
+        [1900, 2, 0, 0, 0, 0, 3, 58],
+        [1900, 2, 14, 0, 0, 0, 3, 72],
+        [2015, 2, 9, 0, 0, 0, 1, 67],
+        [0, 0, 1, 0, 0, 0, 0, 0],
+        [2015, 2, 5, 0, 0, 0, 4, 63, " x"],
+        [1900, 0, 0, 0, 0, 0, 8, 367],
+        ["err", "err"]
+    ])
+);
 yields!(
     strptime,
     r#""1970-01-02T00:00:00Z" | strptime("%Y-%m-%dT%H:%M:%SZ")"#,

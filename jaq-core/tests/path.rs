@@ -23,14 +23,12 @@ fn index_access() {
     give(json!({"_a": 1}), "._a", json!(1));
     give(json!({"_0": 1}), "._0", json!(1));
 
-    // jaq objects can hold non-string keys (from `{(0): 1}`-style construction), so this used
-    // to just read as a miss (-> null) rather than fail here as it does in jq. This build
-    // follows jq's own behavior instead, since jq's behavior is the bar it's held to — see
-    // jaq-json's `index_type_error`. Verified against the oracle (exact wording and status).
+    // jaq objects can hold non-string keys (from `{(0): 1}`-style construction), but as in jq,
+    // only a string indexes an object.
     fail(
         json!({"a": 1}),
         r#".[0]"#,
-        Error::str("Cannot index object with number (0)"),
+        Error::str("Cannot index object with number"),
     );
 
     give(json!([0, 1, 2]), r#".["a", 0, 0 == 0]?"#, json!(0));
@@ -92,6 +90,25 @@ yields!(obj_keyword, "{if: 0} | .if", 0);
 yields!(key_update1, "{} | .a  |= .+1", json!({"a": 1}));
 yields!(key_update2, "{} | .a? |= .+1", json!({"a": 1}));
 
+// jq's messages: a short string key is shown, any other key only by its type.
+yields!(
+    index_type_errors,
+    r#"[try (1 | .b) catch ., try ([] | .[[][0]]) catch ., try ([][0] | .[0 == 0]) catch .,
+      try ([][0] | .[[0]]) catch ., try ({} | .[0]) catch ., try (1 | .[1:2]) catch .,
+      try ("ab" | .[1:] | .[0]) catch ., try ([] | .["a\"b"]) catch .,
+      try (1 | .["123456789012345678901234567890"]) catch .]"#,
+    [
+        r#"Cannot index number with string "b""#,
+        "Cannot index array with null",
+        "Cannot index null with boolean",
+        "Cannot index null with array",
+        "Cannot index object with number",
+        "Cannot index number with object",
+        "Cannot index string with number",
+        r#"Cannot index array with string "a"b""#,
+        "Cannot index number with string"
+    ]
+);
 yields!(null_index1, ".a", json!(null));
 yields!(null_index2, ".[0]", json!(null));
 
@@ -122,7 +139,7 @@ fn index_update() {
     */
 
     give(json!([0, 1, 2]), r#".["a", 0]? |= .+1"#, json!([1, 1, 2]));
-    give(json!([0, 1, 2]), r#".[3]? |= .+1"#, json!([0, 1, 2]));
+    give(json!([0, 1, 2]), r#".[3]? |= .+1"#, json!([0, 1, 2, 1]));
     give(json!("asdf"), ".[0]? |= .+1", json!("asdf"));
 }
 

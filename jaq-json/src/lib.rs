@@ -155,16 +155,22 @@ pub(crate) fn type_error2(l: &Val, r: &Val, message: &str) -> Error {
     ))
 }
 
-/// jq's own wording for indexing a value by a key it cannot take — e.g. `{}[0]`, `[][{}]` or
-/// `1 | .a` — is `Cannot index TYPE1 with TYPE2 (VALUE)`, the index's value cut short as
-/// [`dump_trunc`] does. Verified against the oracle for every kind of value and index.
+/// jq's `jv_get` message for indexing a value by a key it cannot take, e.g. `{}[0]` or `1 | .a`:
+/// `Cannot index TYPE with string "KEY"` for a string key of fewer than 30 bytes, its text as it
+/// is, and `Cannot index TYPE1 with TYPE2` for any other key.
 pub(crate) fn index_type_error(container: &Val, index: &Val) -> Error {
-    Error::str(format_args!(
-        "Cannot index {} with {} ({})",
-        type_name(container),
-        type_name(index),
-        dump_trunc(index)
-    ))
+    match index {
+        Val::TStr(s) | Val::BStr(s) if s.len() < 30 => Error::str(format_args!(
+            "Cannot index {} with string \"{}\"",
+            type_name(container),
+            s.as_bstr()
+        )),
+        _ => Error::str(format_args!(
+            "Cannot index {} with {}",
+            type_name(container),
+            type_name(index)
+        )),
+    }
 }
 
 /// An array index as jq's `jv_get` takes it: truncated to an integer (`.[1.5]` is `.[1]`),
@@ -423,16 +429,25 @@ impl jaq_core::ValT for Val {
         f: impl Fn(Self) -> I,
     ) -> ValX<'a> {
         if let (Val::BStr(_) | Val::TStr(_) | Val::Arr(_), Val::Obj(o)) = (&self, index) {
-            let range = o.get(&Val::utf8_str("start"))..o.get(&Val::utf8_str("end"));
-            return self.map_range(range, opt, f);
+            return match slice_range(o) {
+                Ok(range) => self.map_range(range, opt, f),
+                Err(e) => opt.fail(self, |_| Exn::from(e)),
+            };
         };
         match self {
-            // jq treats null as an empty object or array when updating it by key or index.
-            Val::Null => match index {
-                Val::TStr(_) | Val::BStr(_) => Val::obj(Map::default()).map_index(index, opt, f),
-                Val::Num(_) => Val::Arr(Rc::default()).map_index(index, opt, f),
-                _ => opt.fail(self, |v| Exn::from(index_type_error(&v, index))),
-            },
+            // jq reads `null` at a key, an index or a slice, and updates `null` as an empty
+            // object or array only when the update gives a value; deleting leaves `null`.
+            Val::Null => {
+                let empty = match index {
+                    Val::TStr(_) | Val::BStr(_) => Val::obj(Map::default()),
+                    Val::Num(_) | Val::Obj(_) => Val::Arr(Rc::default()),
+                    _ => return opt.fail(self, |v| Exn::from(index_type_error(&v, index))),
+                };
+                match f(Val::Null).next().transpose()? {
+                    None => Ok(Val::Null),
+                    Some(y) => set_in_empty(empty, index, opt, y),
+                }
+            }
             // jq reads the field first, and only a string names an object's field.
             Val::Obj(_) if !matches!(index, Val::TStr(_) | Val::BStr(_)) => {
                 opt.fail(self, |v| Exn::from(index_type_error(&v, index)))
@@ -456,6 +471,16 @@ impl jaq_core::ValT for Val {
                     }
                 }
                 Ok(self)
+            }
+            // jq reads an array at an array (`indices`), but cannot set or delete it there, even
+            // after `?`.
+            Val::Arr(_) if matches!(index, Val::Arr(_)) => {
+                let x = jaq_core::ValT::index(self.clone(), index)?;
+                let e = match f(x).next().transpose()? {
+                    Some(_) => "Cannot update field at array index of array",
+                    None => "Cannot delete array element of array",
+                };
+                Err(Exn::from(Error::str(e)))
             }
             Val::Arr(_) if !matches!(index, Val::Num(_)) => {
                 opt.fail(self, |v| Exn::from(index_type_error(&v, index)))
@@ -538,13 +563,24 @@ impl jaq_core::ValT for Val {
         let stb = skip_take_bytes;
         let stc = skip_take_chars;
         match self {
+            // as `map_index` updates `null`
+            Val::Null => match f(Val::Null).next().transpose()? {
+                None => Ok(Val::Null),
+                Some(y) => set_range_in_empty(range, opt, y),
+            },
             Val::Arr(ref mut a) => {
                 let (skip, take) = match slice_bounds(range, a.len()) {
                     Ok(bounds) => bounds,
                     Err(e) => return opt.fail(self, |_| Exn::from(e)),
                 };
                 let arr = a.iter().skip(skip).take(take).cloned().collect();
-                let y = f(arr).map(|y| y?.into_arr().map_err(Exn::from)).next();
+                let into_arr = |y: Val| match y {
+                    Val::Arr(a) => Ok(a),
+                    _ => Err(Exn::from(Error::str(
+                        "A slice of an array can only be assigned another array",
+                    ))),
+                };
+                let y = f(arr).map(|y| into_arr(y?)).next();
                 let y = y.transpose()?.unwrap_or_default();
                 Rc::make_mut(a).splice(skip..skip + take, (*y).clone());
                 Ok(self)
@@ -680,6 +716,17 @@ fn slice_bounds(range: val::Range<&Val>, len: usize) -> Result<(usize, usize), E
     Ok((start, end - start))
 }
 
+/// The bounds of a slice object, as jq's `parse_slice` reads them: it must have both a `start`
+/// and an `end`.
+pub(crate) fn slice_range(o: &Map) -> Result<val::Range<&Val>, Error> {
+    let start = o.get(&Val::utf8_str("start"));
+    let end = o.get(&Val::utf8_str("end"));
+    if start.is_none() || end.is_none() {
+        return Err(Error::str("Array/string slice indices must be integers"));
+    }
+    Ok(start..end)
+}
+
 /// The object jq indexes by for a slice: `{"start": ..., "end": ...}`.
 fn slice_object(range: val::Range<&Val>) -> Val {
     let bound = |b: Option<&Val>| b.cloned().unwrap_or(Val::Null);
@@ -713,6 +760,19 @@ fn bytes_splice(b: &mut BytesMut, skip: usize, take: usize, replace: &[u8]) {
     if replace.len() < take {
         b.truncate(final_len);
     }
+}
+
+/// Set the value at `index` of an empty object or array (not generic over an update, so that
+/// [`ValT::map_index`] can call it for `null` without instantiating itself without end).
+fn set_in_empty<'a>(empty: Val, index: &Val, opt: path::Opt, y: Val) -> ValX<'a> {
+    use jaq_core::ValT;
+    empty.map_index(index, opt, |_| core::iter::once(Ok(y.clone())))
+}
+
+/// Set a slice of an empty array, as [`set_in_empty`] sets an index.
+fn set_range_in_empty<'a>(range: val::Range<&Val>, opt: path::Opt, y: Val) -> ValX<'a> {
+    use jaq_core::ValT;
+    Val::Arr(Rc::default()).map_range(range, opt, |_| core::iter::once(Ok(y.clone())))
 }
 
 /// If a range bound is given, absolutise and clip it between 0 and `len`,
@@ -765,13 +825,6 @@ impl Val {
     }
 
     /// If the value is an array, return it, else fail.
-    fn into_arr(self) -> Result<Rc<Array>, Error> {
-        match self {
-            Self::Arr(a) => Ok(a),
-            _ => Err(Error::typ(self, Type::Arr.as_str())),
-        }
-    }
-
     fn as_arr(&self) -> Result<&Rc<Array>, Error> {
         match self {
             Self::Arr(a) => Ok(a),
@@ -785,7 +838,8 @@ impl Val {
 
     fn index_opt(self, index: &Self) -> Result<Option<Val>, Error> {
         Ok(match (self, index) {
-            (Val::Null, _) => None,
+            // jq reads `null` at a string, number or slice index, and fails at any other.
+            (Val::Null, Val::TStr(_) | Val::BStr(_) | Val::Num(_) | Val::Obj(_)) => None,
             (Val::BStr(a), Val::Num(i)) => {
                 jq_array_index(i, a.len()).map(|i| usize::from(a[i]).into())
             }
@@ -807,9 +861,7 @@ impl Val {
             (s @ Val::Obj(_), i) => return Err(index_type_error(&s, i)),
             (v @ (Val::BStr(_) | Val::TStr(_) | Val::Arr(_)), Val::Obj(o)) => {
                 use jaq_core::ValT;
-                let start = o.get(&Val::utf8_str("start"));
-                let end = o.get(&Val::utf8_str("end"));
-                return v.range(start..end).map(Some);
+                return v.range(slice_range(o)?).map(Some);
             }
             (s, _) => return Err(index_type_error(&s, index)),
         })
@@ -848,9 +900,9 @@ impl From<String> for Val {
 
 impl From<val::Range<Val>> for Val {
     fn from(r: val::Range<Val>) -> Self {
-        let kv = |(k, v): (&str, Option<_>)| v.map(|v| (k.to_owned().into(), v));
+        let kv = |(k, v): (&str, Option<_>)| (k.to_owned().into(), v.unwrap_or(Val::Null));
         let kvs = [("start", r.start), ("end", r.end)];
-        Val::obj(kvs.into_iter().flat_map(kv).collect())
+        Val::obj(kvs.into_iter().map(kv).collect())
     }
 }
 

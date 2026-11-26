@@ -750,37 +750,19 @@ For example:
 ### `delpaths($paths)`
 
 The filter `delpaths($paths)` takes an array of paths and
-deletes all corresponding values in the order given by the array.
+deletes all corresponding values, as `jq` does:
+it sorts the paths and groups them by their first key.
+For each group in turn, it deletes the rest of the group's paths
+from the value at that key, as the groups before it have changed the value.
+Then it deletes the keys that end a path, all at once.
+A negative array index counts from the end of the array.
 For example:
 
 - `[1, 2, 3] | delpaths([[0]])      --> [2, 3]`
 - `[{a: 1, b: 2}, 3] | delpaths([[0, "b"], [1]]) --> [{"a": 1}]`
-
-::: Compatibility
-In `jq`,
-the `$paths` are interpreted relative to the _original_ input value, whereas
-in jaq, they are interpreted relative to the _current_ value. 
-For example,
-`[1, 2, 3] | delpaths([[0], [0]]) --> [3]` in jaq, because
-it first deletes the `0`-th element `1` (yielding `[2, 3]`),
-then it  deletes the `0`-th element `2` (yielding `[3]`).
-Here, `jq` yields `[2, 3]`, because the `0`-th element always
-refers to the `0`-th element of the original input, which is `1`.
-
-To use `delpaths` in an interoperable fashion, use `$paths` such that:
-
-- Paths to descendants come before paths to their ancestors.
-- Paths to array elements to the right come before paths to elements to the left.
-
-For example, `..` returns
-_ancestors_ before descendants and
-array elements to the _left_ before elements to the right.
-To use the output of `..` in `delpaths`, it suffices to
-reverse the order of its outputs:
-
-- `["a", 0, "b", 1] | delpaths([path(.. | strings)] | reverse) --> [0,  1 ]` (right)
-- `["a", 0, "b", 1] | delpaths([path(.. | strings)]          ) --> [0, "b"]` (wrong)
-:::
+- `[1, 2, 3] | delpaths([[0], [0]]) --> [2, 3]`
+- `[0, 1, 2, 3] | delpaths([[-2], [-1]]) --> [0, 1]`
+- `[[0, 1], [2, 3]] | delpaths([[1, 0], [-1, 0]]) --> [[0, 1], []]`
 
 {#pick}
 ### `pick(f)`
@@ -1918,17 +1900,13 @@ If the input is a BDT array, then
 
 For example, if the user is in the CET zone (+0100):
 
-- `0 | strftime("%T %z (%Z)") --> "00:00:00 +0000 (UTC)"`
-- `[1970, 0, 1, 0, 0, 0] | strftime("%T %z (%Z)") --> "00:00:00 +0000 (UTC)"`
+- `0 | strftime("%T %z (%Z)") --> "00:00:00 +0000 (GMT)"`
+- `[1970, 0, 1, 0, 0, 0] | strftime("%T %z (%Z)") --> "00:00:00 +0000 (GMT)"`
 - `0 | strflocaltime("%T %z (%Z)")` yields `"01:00:00 +0100 (CET)"`
 - `[1970, 0, 1, 0, 0, 0] | strflocaltime("%T %z (%Z)")` yields `"00:00:00 +0100 (CET)"`
 
-::: Compatibility
-
-`jq` prints `GMT` instead of `UTC` in the examples above; however,
-GMT is not the same as UTC.
-
-:::
+The format is that of the C library's `strftime` in the C locale, as in `jq`,
+for years beyond 9999 as well.
 
 {#strptime}
 ### `strptime($fmt)`

@@ -89,6 +89,6 @@ fn repeat() {
     give(json!([0, 1]), "[limit(4; repeat(.[]))]", y);
 }
 
-yields!(tostring_zero, "1.0 - 1.0 | tostring", "0.0");
+yields!(tostring_zero, "1.0 - 1.0 | tostring", "0");
 yields!(tostring_str, r#""\n" | tostring"#, "\n");
 yields!(tostring_arr_str, r#"["\n"] | tostring"#, "[\"\\n\"]");
