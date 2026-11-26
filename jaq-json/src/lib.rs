@@ -472,6 +472,16 @@ impl jaq_core::ValT for Val {
                 }
                 Ok(self)
             }
+            // jq reads an array at an array (`indices`), but cannot set or delete it there, even
+            // after `?`.
+            Val::Arr(_) if matches!(index, Val::Arr(_)) => {
+                let x = jaq_core::ValT::index(self.clone(), index)?;
+                let e = match f(x).next().transpose()? {
+                    Some(_) => "Cannot update field at array index of array",
+                    None => "Cannot delete array element of array",
+                };
+                Err(Exn::from(Error::str(e)))
+            }
             Val::Arr(_) if !matches!(index, Val::Num(_)) => {
                 opt.fail(self, |v| Exn::from(index_type_error(&v, index)))
             }
@@ -564,7 +574,13 @@ impl jaq_core::ValT for Val {
                     Err(e) => return opt.fail(self, |_| Exn::from(e)),
                 };
                 let arr = a.iter().skip(skip).take(take).cloned().collect();
-                let y = f(arr).map(|y| y?.into_arr().map_err(Exn::from)).next();
+                let into_arr = |y: Val| match y {
+                    Val::Arr(a) => Ok(a),
+                    _ => Err(Exn::from(Error::str(
+                        "A slice of an array can only be assigned another array",
+                    ))),
+                };
+                let y = f(arr).map(|y| into_arr(y?)).next();
                 let y = y.transpose()?.unwrap_or_default();
                 Rc::make_mut(a).splice(skip..skip + take, (*y).clone());
                 Ok(self)
@@ -809,13 +825,6 @@ impl Val {
     }
 
     /// If the value is an array, return it, else fail.
-    fn into_arr(self) -> Result<Rc<Array>, Error> {
-        match self {
-            Self::Arr(a) => Ok(a),
-            _ => Err(Error::typ(self, Type::Arr.as_str())),
-        }
-    }
-
     fn as_arr(&self) -> Result<&Rc<Array>, Error> {
         match self {
             Self::Arr(a) => Ok(a),

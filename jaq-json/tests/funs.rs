@@ -491,6 +491,14 @@ yields!(
     "[null,[2,3]]"
 );
 
+// jq's `jv_set` and `jv_dels`: an array cannot be set or deleted at an array, and only an
+// array can be assigned to a slice of an array.
+yields!(
+    array_update_errors,
+    r#"[try ([1] | .[[1]] |= 1) catch ., try ([1] | .[[1]] |= empty) catch ., try ([1] | .[[1]]? |= 1) catch ., (try ([1] | .[0:1] |= (5, null, {})) catch .), try (null | .[1:2] |= 5) catch ., ([1] | .[0:1] |= empty), ([1] | .[{}]? |= 1)] | tojson"#,
+    r#"["Cannot update field at array index of array","Cannot delete array element of array","Cannot update field at array index of array","A slice of an array can only be assigned another array","A slice of an array can only be assigned another array",[],[1]]"#
+);
+
 // As jq's `parse_slice`, a slice object must have both a start and an end.
 yields!(
     slice_object_bounds,
