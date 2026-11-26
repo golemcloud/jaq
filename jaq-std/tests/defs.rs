@@ -52,6 +52,13 @@ yields!(
     [0, 1, 2, 3, 4]
 );
 
+// Flattening an array nested deeper than a native stack could recurse through.
+yields!(
+    flatten_nested_deep,
+    "reduce range(10000) as $i (null; [.]) | [flatten, flatten(9998)]",
+    json!([[null], [[null]]])
+);
+
 // here, we diverge from jq, which returns just 1
 // as jq, through `.[]`
 yields!(flatten_obj, "{a: 1} | flatten", json!([1]));
