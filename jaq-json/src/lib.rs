@@ -155,16 +155,22 @@ pub(crate) fn type_error2(l: &Val, r: &Val, message: &str) -> Error {
     ))
 }
 
-/// jq's own wording for indexing a value by a key it cannot take — e.g. `{}[0]`, `[][{}]` or
-/// `1 | .a` — is `Cannot index TYPE1 with TYPE2 (VALUE)`, the index's value cut short as
-/// [`dump_trunc`] does. Verified against the oracle for every kind of value and index.
+/// jq's `jv_get` message for indexing a value by a key it cannot take, e.g. `{}[0]` or `1 | .a`:
+/// `Cannot index TYPE with string "KEY"` for a string key of fewer than 30 bytes, its text as it
+/// is, and `Cannot index TYPE1 with TYPE2` for any other key.
 pub(crate) fn index_type_error(container: &Val, index: &Val) -> Error {
-    Error::str(format_args!(
-        "Cannot index {} with {} ({})",
-        type_name(container),
-        type_name(index),
-        dump_trunc(index)
-    ))
+    match index {
+        Val::TStr(s) | Val::BStr(s) if s.len() < 30 => Error::str(format_args!(
+            "Cannot index {} with string \"{}\"",
+            type_name(container),
+            s.as_bstr()
+        )),
+        _ => Error::str(format_args!(
+            "Cannot index {} with {}",
+            type_name(container),
+            type_name(index)
+        )),
+    }
 }
 
 /// An array index as jq's `jv_get` takes it: truncated to an integer (`.[1.5]` is `.[1]`),
@@ -785,7 +791,8 @@ impl Val {
 
     fn index_opt(self, index: &Self) -> Result<Option<Val>, Error> {
         Ok(match (self, index) {
-            (Val::Null, _) => None,
+            // jq reads `null` at a string, number or slice index, and fails at any other.
+            (Val::Null, Val::TStr(_) | Val::BStr(_) | Val::Num(_) | Val::Obj(_)) => None,
             (Val::BStr(a), Val::Num(i)) => {
                 jq_array_index(i, a.len()).map(|i| usize::from(a[i]).into())
             }
