@@ -41,13 +41,13 @@ yields!(
 yields!(
     strftime_mu,
     r#"86400.123456 | strftime("%F %T.%6f")"#,
-    "1970-01-02 00:00:00.123456"
+    "1970-01-02 00:00:00.   %6f"
 );
 yields!(gmtime, r"86400 | gmtime", [1970, 0, 2, 0, 0, 0, 5, 1]);
 yields!(
     gmtime_mu,
     r"86400.123456 | gmtime",
-    json!([1970, 0, 2, 0, 0, 0.123456, 5, 1])
+    json!([1970, 0, 2, 0, 0, 0.12345600000116974, 5, 1])
 );
 yields!(gmtime_mktime_mu, r"86400.123456 | gmtime | mktime", 86400);
 yields!(

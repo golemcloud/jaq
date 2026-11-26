@@ -1900,17 +1900,13 @@ If the input is a BDT array, then
 
 For example, if the user is in the CET zone (+0100):
 
-- `0 | strftime("%T %z (%Z)") --> "00:00:00 +0000 (UTC)"`
-- `[1970, 0, 1, 0, 0, 0] | strftime("%T %z (%Z)") --> "00:00:00 +0000 (UTC)"`
+- `0 | strftime("%T %z (%Z)") --> "00:00:00 +0000 (GMT)"`
+- `[1970, 0, 1, 0, 0, 0] | strftime("%T %z (%Z)") --> "00:00:00 +0000 (GMT)"`
 - `0 | strflocaltime("%T %z (%Z)")` yields `"01:00:00 +0100 (CET)"`
 - `[1970, 0, 1, 0, 0, 0] | strflocaltime("%T %z (%Z)")` yields `"00:00:00 +0100 (CET)"`
 
-::: Compatibility
-
-`jq` prints `GMT` instead of `UTC` in the examples above; however,
-GMT is not the same as UTC.
-
-:::
+The format is that of the C library's `strftime` in the C locale, as in `jq`,
+for years beyond 9999 as well.
 
 {#strptime}
 ### `strptime($fmt)`
